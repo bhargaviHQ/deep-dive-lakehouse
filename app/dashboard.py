@@ -107,7 +107,7 @@ with left:
     )
 
 with right:
-    st.subheader("Worst tip rates by hour and borough")
+    st.subheader("Tip rates by hour and borough")
     st.plotly_chart(
         px.line(q_tip_rate, x="hour_of_day", y="tip_rate_pct", color="borough"),
         use_container_width=True,

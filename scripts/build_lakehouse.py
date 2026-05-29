@@ -140,7 +140,7 @@ def _build_lake(con: duckdb.DuckDBPyConnection) -> None:
                 fare_amount,
                 tip_amount,
                 total_amount,
-                ROUND(tip_amount / NULLIF(total_amount, 0), 4) AS tip_rate,
+                ROUND(tip_amount / NULLIF(fare_amount, 0), 4) AS tip_rate,
                 event_type,
                 DATE(pickup_datetime) AS pickup_date,
                 HOUR(pickup_datetime) AS hour_of_day,
@@ -229,7 +229,7 @@ def _build_star_schema(con: duckdb.DuckDBPyConnection) -> None:
             MONTH(pickup_date) AS month_num,
             DAY(pickup_date) AS day_num,
             DAYNAME(pickup_date) AS weekday_name,
-            CASE WHEN DAYOFWEEK(pickup_date) IN (0, 6) THEN TRUE ELSE FALSE END AS is_weekend,
+            CASE WHEN STRFTIME(pickup_date, '%w') IN ('0', '6') THEN TRUE ELSE FALSE END AS is_weekend,
             CASE WHEN event_type = 'holiday' THEN TRUE ELSE FALSE END AS is_holiday,
             CASE WHEN event_type = 'rainstorm' THEN TRUE ELSE FALSE END AS is_rainstorm
         FROM (
@@ -276,7 +276,7 @@ def _print_partition_scan_stats(con: duckdb.DuckDBPyConnection) -> None:
         WHERE pickup_date BETWEEN DATE '2024-12-24' AND DATE '2024-12-25'
         """
     ).fetchone()[0]
-    pct = (scanned_days / total_days) * 100 if total_days else 0
+    pct = (scanned_days / total_days) * 100 if total_days > 0 else 0
     print(f"YoY-style filter scans {pct:.2f}% of day partitions ({scanned_days}/{total_days}).")
 
 
