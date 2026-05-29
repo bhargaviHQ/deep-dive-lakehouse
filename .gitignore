@@ -427,3 +427,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Lakehouse build artifacts
+data/lake/
+data/warehouse/
+data/raw/generated/
