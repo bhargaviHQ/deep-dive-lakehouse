@@ -432,3 +432,6 @@ FodyWeavers.xsd
 data/lake/
 data/warehouse/
 data/raw/generated/
+
+# Python virtual environment
+.venv/
