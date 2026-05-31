@@ -14,6 +14,9 @@ SILVER_DIR = ROOT / "data" / "lake" / "silver" / "trips"
 GOLD_DIR = ROOT / "data" / "lake" / "gold"
 WAREHOUSE_PATH = ROOT / "data" / "warehouse" / "lakehouse.duckdb"
 
+FLAT_PATH = ROOT / "data" / "lake" / "flat" / "trips.parquet"
+SILVER_UNCOMPRESSED_DIR = ROOT / "data" / "lake" / "silver_uncompressed" / "trips"
+
 ZONES = [
     (4, "Alphabet City", "Manhattan"),
     (12, "Upper East Side North", "Manhattan"),
@@ -34,7 +37,7 @@ RAINSTORMS = {"2023-04-30", "2023-09-29", "2024-04-03", "2024-09-20"}
 
 
 def _reset_dirs() -> None:
-    for target in [BRONZE_DIR, SILVER_DIR, GOLD_DIR]:
+    for target in [BRONZE_DIR, SILVER_DIR, GOLD_DIR, FLAT_PATH.parent, SILVER_UNCOMPRESSED_DIR]:
         if target.exists():
             shutil.rmtree(target)
     for target in [RAW_PATH.parent, WAREHOUSE_PATH.parent]:
@@ -43,6 +46,8 @@ def _reset_dirs() -> None:
     BRONZE_DIR.parent.mkdir(parents=True, exist_ok=True)
     SILVER_DIR.parent.mkdir(parents=True, exist_ok=True)
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
+    FLAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SILVER_UNCOMPRESSED_DIR.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _generate_raw(rows: int = 150_000, seed: int = 7) -> pd.DataFrame:
@@ -155,6 +160,8 @@ def _build_lake(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
 
+    # SET threads=1 so each date partition writes exactly 1 file (avoids small-file explosion)
+    con.execute("SET threads=1")
     con.execute(
         f"""
         COPY (
@@ -190,6 +197,7 @@ def _build_lake(con: duckdb.DuckDBPyConnection) -> None:
         (FORMAT PARQUET, PARTITION_BY (pickup_date), COMPRESSION ZSTD)
         """
     )
+    con.execute("RESET threads")
 
 
 def _build_star_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -262,6 +270,68 @@ def _build_star_schema(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _build_flat_parquet(con: duckdb.DuckDBPyConnection) -> None:
+    """Single unpartitioned, uncompressed Parquet — baseline for Tab 1 & 2."""
+    con.execute(
+        f"""
+        COPY (
+            SELECT * FROM read_parquet('{SILVER_DIR.as_posix()}/**/*.parquet', hive_partitioning=true)
+        )
+        TO '{FLAT_PATH.as_posix()}'
+        (FORMAT PARQUET, COMPRESSION uncompressed)
+        """
+    )
+
+
+def _build_uncompressed_parquet(con: duckdb.DuckDBPyConnection) -> None:
+    """Partitioned but uncompressed Parquet — file-size baseline for Tab 2."""
+    con.execute(
+        f"""
+        COPY (
+            SELECT * FROM read_parquet('{SILVER_DIR.as_posix()}/**/*.parquet', hive_partitioning=true)
+        )
+        TO '{SILVER_UNCOMPRESSED_DIR.as_posix()}'
+        (FORMAT PARQUET, PARTITION_BY (pickup_year, pickup_month, pickup_day), COMPRESSION uncompressed)
+        """
+    )
+
+
+def _build_flat_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Fully denormalized flat table in the warehouse — baseline for Tab 4."""
+    con.execute("DROP TABLE IF EXISTS flat_trips")
+    con.execute(
+        """
+        CREATE TABLE flat_trips AS
+        SELECT
+            f.trip_id,
+            f.pickup_datetime,
+            f.dropoff_datetime,
+            f.hour_of_day,
+            f.trip_distance_miles,
+            f.fare_amount,
+            f.tip_amount,
+            f.total_amount,
+            f.tip_rate,
+            f.event_type,
+            pz.zone_name  AS pickup_zone_name,
+            pz.borough    AS pickup_borough,
+            dz.zone_name  AS dropoff_zone_name,
+            dz.borough    AS dropoff_borough,
+            v.vendor_name,
+            d.date_value,
+            d.weekday_name,
+            d.is_weekend,
+            d.is_holiday,
+            d.is_rainstorm
+        FROM fact_trips f
+        JOIN dim_zone    pz ON pz.zone_id   = f.pickup_zone_id
+        JOIN dim_zone    dz ON dz.zone_id   = f.dropoff_zone_id
+        JOIN dim_vendor  v  ON v.vendor_id  = f.vendor_id
+        JOIN dim_date    d  ON d.date_id    = f.date_id
+        """
+    )
+
+
 def _print_partition_scan_stats(con: duckdb.DuckDBPyConnection) -> None:
     total_days = con.execute(
         f"""
@@ -287,12 +357,17 @@ def main() -> None:
     with duckdb.connect() as con:
         _build_lake(con)
         _print_partition_scan_stats(con)
+        _build_flat_parquet(con)
+        _build_uncompressed_parquet(con)
 
     with duckdb.connect(WAREHOUSE_PATH.as_posix()) as con:
         _build_star_schema(con)
+        _build_flat_table(con)
 
     print(f"Raw CSV: {RAW_PATH}")
     print(f"Parquet lake ready under: {ROOT / 'data' / 'lake'}")
+    print(f"Flat unpartitioned Parquet: {FLAT_PATH}")
+    print(f"Uncompressed partitioned Parquet: {SILVER_UNCOMPRESSED_DIR}")
     print(f"Star schema warehouse: {WAREHOUSE_PATH}")
 
 
