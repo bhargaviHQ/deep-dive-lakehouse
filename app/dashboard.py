@@ -83,6 +83,24 @@ def _speedup_badge(before_ms: float, after_ms: float) -> None:
         )
 
 
+def _partition_day_dir(base_dir: Path, day: pd.Timestamp) -> Path:
+    return (
+        base_dir
+        / f"pickup_year={day.year}"
+        / f"pickup_month={day.month}"
+        / f"pickup_day={day.day}"
+    )
+
+
+def _files_and_mb_for_dates(base_dir: Path, dates: set[str]) -> tuple[int, float]:
+    files, mb = 0, 0.0
+    for d in dates:
+        day_dir = _partition_day_dir(base_dir, pd.to_datetime(d))
+        files += count_parquet_files(day_dir)
+        mb += get_dir_size_mb(day_dir)
+    return files, mb
+
+
 # ── Tab 1: Partitioning ──────────────────────────────────────────────────────
 
 def render_partitioning_tab(con: duckdb.DuckDBPyConnection) -> None:
@@ -194,6 +212,115 @@ def render_partitioning_tab(con: duckdb.DuckDBPyConnection) -> None:
         st.markdown("**After** — only matching partitions scanned")
         fig_after = build_partition_heatmap(all_dates, scanned_dates)
         st.plotly_chart(fig_after, use_container_width=True, key="hm_after")
+
+
+# ── Tab 2: Incremental processing ────────────────────────────────────────────
+
+def render_incremental_tab(con: duckdb.DuckDBPyConnection) -> None:
+    st.markdown("### Full refresh vs incremental processing")
+    st.markdown(
+        "Simulate ingesting a new day into Silver. "
+        "**Full refresh** rewrites all historical partitions up to that day, while "
+        "**incremental** rewrites only impacted partitions."
+    )
+
+    all_dates = con.execute("SELECT DISTINCT pickup_date AS d FROM fact_trips ORDER BY d").df()["d"].tolist()
+    all_date_str = [d.isoformat() for d in all_dates]
+
+    new_day = st.selectbox("New day to ingest", all_date_str[-31:], index=30, key="inc_new_day")
+    prior_dates = [d for d in all_date_str if d < new_day]
+    default_late_idx = max(0, len(prior_dates) - 8)
+    late_day = st.selectbox("Late-arriving correction day", prior_dates, index=default_late_idx, key="inc_late_day")
+    run = st.button("▶ Run Incremental Lab", key="inc_run")
+
+    if not run:
+        return
+
+    silver_glob = f"{SILVER_DIR.as_posix()}/**/*.parquet"
+    touched_full = {d for d in all_date_str if d <= new_day}
+    touched_incremental = {new_day}
+    touched_merge = {new_day, late_day}
+
+    full_files, full_mb = _files_and_mb_for_dates(SILVER_DIR, touched_full)
+    inc_files, inc_mb = _files_and_mb_for_dates(SILVER_DIR, touched_incremental)
+    merge_files, merge_mb = _files_and_mb_for_dates(SILVER_DIR, touched_merge)
+
+    full_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM read_parquet('{silver_glob}', hive_partitioning=true)
+        WHERE pickup_date <= DATE '{new_day}'
+    """
+    incremental_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM read_parquet('{silver_glob}', hive_partitioning=true)
+        WHERE pickup_date = DATE '{new_day}'
+    """
+    late_rows_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM read_parquet('{silver_glob}', hive_partitioning=true)
+        WHERE pickup_date = DATE '{late_day}'
+    """
+    merge_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM (
+            SELECT b.trip_id, COALESCE(l.total_amount, b.total_amount) AS total_amount
+            FROM (
+                SELECT trip_id, total_amount
+                FROM read_parquet('{silver_glob}', hive_partitioning=true)
+                WHERE pickup_date <= DATE '{new_day}'
+            ) b
+            LEFT JOIN (
+                SELECT trip_id, total_amount * 1.08 AS total_amount
+                FROM read_parquet('{silver_glob}', hive_partitioning=true)
+                WHERE pickup_date = DATE '{late_day}'
+            ) l USING (trip_id)
+        )
+    """
+
+    with st.spinner("Running full refresh vs incremental comparison..."):
+        with duckdb.connect() as c1:
+            df_full, t_full = run_timed_query(c1, full_sql)
+        with duckdb.connect() as c2:
+            df_inc, t_inc = run_timed_query(c2, incremental_sql)
+        with duckdb.connect() as c3:
+            df_late_rows, _ = run_timed_query(c3, late_rows_sql)
+        with duckdb.connect() as c4:
+            _, t_merge = run_timed_query(c4, merge_sql)
+
+    rows_full = int(df_full["cnt"].iloc[0])
+    rows_inc = int(df_inc["cnt"].iloc[0])
+    rows_late = int(df_late_rows["cnt"].iloc[0])
+    rows_merge = rows_inc + rows_late
+
+    st.markdown("#### New-day load impact")
+    l1, m1, r1 = st.columns([5, 1, 5])
+    with l1:
+        _metric_card("BEFORE — Full refresh", full_files, full_mb, rows_full, "#94a3b8", t_full)
+    with m1:
+        st.markdown("<div style='margin-top:70px;text-align:center;font-size:28px;'>→</div>", unsafe_allow_html=True)
+    with r1:
+        _metric_card("AFTER — Incremental new-day load", inc_files, inc_mb, rows_inc, "#22c55e", t_inc)
+
+    _reduction_badge(rows_full, rows_inc, "rows processed")
+    _speedup_badge(t_full, t_inc)
+
+    st.markdown("#### Late-arriving data correction")
+    st.caption(
+        f"Simulated correction: `{late_day}` arrives late and updates historical rows. "
+        "Incremental merge touches only affected partitions."
+    )
+    l2, m2, r2 = st.columns([5, 1, 5])
+    with l2:
+        _metric_card("BEFORE — Full refresh for correction", full_files, full_mb, rows_full, "#94a3b8", t_full)
+    with m2:
+        st.markdown("<div style='margin-top:70px;text-align:center;font-size:28px;'>→</div>", unsafe_allow_html=True)
+    with r2:
+        _metric_card("AFTER — Incremental merge/update", merge_files, merge_mb, rows_merge, "#22c55e", t_merge)
+
+    st.info(
+        f"Late-arriving rows processed: **{rows_late:,}**. "
+        f"Incremental merge rewrites **{merge_files}** partition files instead of **{full_files}** in a full rebuild."
+    )
 
 
 # ── Tab 2: Compression ───────────────────────────────────────────────────────
@@ -568,8 +695,9 @@ import pandas as pd  # noqa: E402 — used inside render functions above
 st.title("Lakehouse Optimization Lab")
 st.caption("Click a tab, configure the query, and see how each data engineering decision changes performance.")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Partitioning",
+    "Incremental Processing",
     "Compression",
     "Pre-aggregation",
     "Star Schema",
@@ -578,10 +706,12 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     render_partitioning_tab(con)
 with tab2:
-    render_compression_tab(con)
+    render_incremental_tab(con)
 with tab3:
-    render_preagg_tab(con)
+    render_compression_tab(con)
 with tab4:
+    render_preagg_tab(con)
+with tab5:
     render_star_schema_tab(con)
 
 con.close()

@@ -24,6 +24,7 @@ Built on synthetic NYC taxi data (150K trips, 2023–2024) using DuckDB + Parque
 | Tab | Question answered | Key metric |
 |---|---|---|
 | **Partitioning** | How does hive partitioning reduce file scans? | 1,119 files → 4 files for a 3-day query |
+| **Incremental Processing** | How much work is avoided by loading only new/late data? | Full rebuild partitions vs only impacted day partitions |
 | **Compression** | What does ZSTD actually save? | 12.9 MB → 8.6 MB, same layout |
 | **Pre-aggregation** | How does a Gold mart cut rows scanned? | 150,000 rows → 1,462 rows (99% less) |
 | **Star Schema** | Why normalize? | `zone_name` stored 150,000× vs 11× |
@@ -168,7 +169,7 @@ This is the measurable payoff of date partitioning — a year-over-year query to
 
 ```
 ├── app/
-│   ├── dashboard.py        Streamlit Optimization Lab (4 tabs)
+│   ├── dashboard.py        Streamlit Optimization Lab (5 tabs)
 │   └── utils.py            Shared helpers: timing, file counts, chart builders
 ├── scripts/
 │   ├── build_lakehouse.py  Full pipeline: raw → bronze → silver → gold → DuckDB
