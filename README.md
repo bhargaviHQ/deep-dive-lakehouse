@@ -6,6 +6,19 @@ Built on synthetic NYC taxi data (150K trips, 2023–2024) using DuckDB + Parque
 
 ---
 
+## Table of contents
+
+- [What it demonstrates](#what-it-demonstrates)
+- [Screenshots](#screenshots)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [Stack](#stack)
+- [Data model](#data-model)
+- [Partition pruning metric](#partition-pruning-metric)
+- [Project structure](#project-structure)
+
+---
+
 ## What it demonstrates
 
 | Tab | Question answered | Key metric |
@@ -49,6 +62,13 @@ Both models answer identical queries in similar time. The difference is maintain
 
 ## Quick start
 
+### Prerequisites
+
+- Python 3.10+
+- `pip` and `venv` available in your shell
+
+### Setup and run
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -62,6 +82,16 @@ streamlit run app/dashboard.py
 ```
 
 Open **http://localhost:8501**. Select a date range of 2–3 days on the Partitioning tab to see the most dramatic contrast.
+
+### Useful commands
+
+```bash
+# Regenerate dashboard screenshots after launching Streamlit
+python scripts/take_screenshots.py
+
+# Clean generated data and rebuild from scratch
+rm -rf data && python scripts/build_lakehouse.py
+```
 
 ---
 
